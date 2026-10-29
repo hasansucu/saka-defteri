@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="128" fill="#0284c7"/>
+  <defs>
+    <linearGradient id="waterGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0369a1"/>
+    </linearGradient>
+  </defs>
+  <!-- Water Droplet Background Shape -->
+  <path d="M256 70 C256 70 380 220 380 320 C380 388.5 324.5 444 256 444 C187.5 444 132 388.5 132 320 C132 220 256 70 256 70 Z" fill="url(#waterGrad)"/>
+  <circle cx="210" cy="270" r="30" fill="white" opacity="0.3"/>
+  <!-- Truck / Delivery Icon in the Center -->
+  <path d="M190 280 L290 280 L315 315 L345 315 L345 355 L190 355 Z" fill="white" opacity="0.95"/>
+  <circle cx="225" cy="360" r="18" fill="#0369a1"/>
+  <circle cx="315" cy="360" r="18" fill="#0369a1"/>
+  <circle cx="225" cy="360" r="8" fill="white"/>
+  <circle cx="315" cy="360" r="8" fill="white"/>
+  <path d="M290 285 L312 312 L290 312 Z" fill="#0284c7"/>
+</svg>
