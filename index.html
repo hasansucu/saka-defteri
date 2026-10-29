@@ -12,6 +12,55 @@
   <link rel="icon" type="image/svg+xml" href="./icon.svg" />
   <link rel="apple-touch-icon" href="./icon.svg" />
 
+  <!-- Global Error Handler: Displays errors in a clear red box instead of a blank white page -->
+  <script>
+    (function() {
+      function showGlobalError(title, msg, stack) {
+        var box = document.getElementById('global-error-box');
+        if (!box) {
+          box = document.createElement('div');
+          box.id = 'global-error-box';
+          box.style.cssText = 'position:fixed;top:12px;left:12px;right:12px;max-width:760px;margin:0 auto;z-index:999999;background:#fff1f2;border:2px solid #e11d48;color:#9f1239;padding:16px 20px;border-radius:16px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;box-shadow:0 12px 30px rgba(0,0,0,0.25);line-height:1.5;';
+          var h = document.createElement('h3');
+          h.style.cssText = 'font-size:15px;font-weight:900;margin:0 0 8px 0;display:flex;align-items:center;gap:8px;color:#be123c;';
+          h.innerHTML = '⚠️ Sayfa Yükleme / Çalışma Hatası';
+          box.appendChild(h);
+          var sub = document.createElement('p');
+          sub.style.cssText = 'font-size:12px;margin:0 0 10px 0;color:#881337;font-weight:600;';
+          sub.innerText = 'Uygulama çalışırken bir hata oluştu:';
+          box.appendChild(sub);
+          var pre = document.createElement('pre');
+          pre.id = 'global-error-pre';
+          pre.style.cssText = 'background:#ffe4e6;border:1px solid #fda4af;padding:10px 12px;border-radius:10px;font-size:11px;font-family:monospace;overflow-x:auto;white-space:pre-wrap;color:#9f1239;max-height:220px;';
+          box.appendChild(pre);
+          var btn = document.createElement('button');
+          btn.style.cssText = 'margin-top:12px;padding:8px 16px;background:#e11d48;color:#fff;border:none;border-radius:10px;font-size:12px;font-weight:bold;cursor:pointer;';
+          btn.innerText = 'Sayfayı Yeniden Yükle';
+          btn.onclick = function() { window.location.reload(); };
+          box.appendChild(btn);
+          (document.body || document.documentElement).appendChild(box);
+        }
+        var p = document.getElementById('global-error-pre');
+        if (p) {
+          var text = (title ? '[' + title + '] ' : '') + msg;
+          if (stack) text += '
+
+' + stack;
+          p.innerText = (p.innerText ? p.innerText + '
+---
+' : '') + text;
+        }
+      }
+      window.addEventListener('error', function(e) {
+        showGlobalError('Hata', (e.message || String(e)) + (e.filename ? ' (' + e.filename + ':' + e.lineno + ':' + e.colno + ')' : ''), e.error ? e.error.stack : null);
+      });
+      window.addEventListener('unhandledrejection', function(e) {
+        var r = e.reason;
+        showGlobalError('Vaat Hatası', r ? (r.message || String(r)) : 'Bilinmeyen vaat reddi', r ? r.stack : null);
+      });
+    })();
+  </script>
+
   <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -1485,7 +1534,7 @@
           setLastSyncDate(payload.exportedAt);
           setLastSyncDevice(deviceName);
           setHasNewerOnDrive(false);
-          showToast('Kayıtlar PIN ile şifrelenerek Google Drive'a yüklendi!', 'success');
+          showToast("Kayıtlar PIN ile şifrelenerek Google Drive'a yüklendi!", 'success');
         } catch (err) {
           if (err.message === 'OTURUM_ZAMAN_ASIMI') {
             try {
@@ -1495,14 +1544,14 @@
               setLastSyncDate(payload.exportedAt);
               setLastSyncDevice(deviceName);
               setHasNewerOnDrive(false);
-              showToast('Kayıtlar PIN ile şifrelenerek Google Drive'a yüklendi!', 'success');
+              showToast("Kayıtlar PIN ile şifrelenerek Google Drive'a yüklendi!", 'success');
               return;
             } catch (e) {
               showToast('Drive oturum yenileme başarısız oldu.', 'error');
               return;
             }
           }
-          showToast('Drive'a gönderme hatası: ' + (err.message || ''), 'error');
+          showToast("Drive'a gönderme hatası: " + (err.message || ''), 'error');
         } finally {
           setIsDriveSyncing(false);
         }
@@ -1519,12 +1568,12 @@
           }
           const payload = await fetchDriveSyncPayload(token);
           if (!payload) {
-            showToast('Google Drive'da henüz kayıt bulunamadı. Önce diğer cihazdan gönderin.', 'info');
+            showToast("Google Drive'da henüz kayıt bulunamadı. Önce diğer cihazdan gönderin.", 'info');
             return;
           }
           setDrivePullModalData({ isOpen: true, payload, isAutoPrompt: false });
         } catch (err) {
-          showToast('Drive'dan alma hatası: ' + (err.message || ''), 'error');
+          showToast("Drive'dan alma hatası: " + (err.message || ''), 'error');
         } finally {
           setIsDriveSyncing(false);
         }
@@ -1552,7 +1601,7 @@
 
           setHasNewerOnDrive(false);
           setDrivePullModalData({ isOpen: false, payload: null, isAutoPrompt: false });
-          showToast('Kayıtlar Google Drive'dan başarıyla alındı ve güncellendi!', 'success');
+          showToast("Kayıtlar Google Drive'dan başarıyla alındı ve güncellendi!", 'success');
         } catch (err) {
           showToast('Drive kaydı açılamadı! PIN kodu bu dosyanın şifresiyle uyuşmuyor.', 'error');
         }
@@ -1591,7 +1640,7 @@
           });
         }
         return list;
-      }, [appData, activeProject, activeFilter, searchQuery]);
+      }, [appData, activeFilter, searchQuery]);
 
       // Metrics calculation
       const metrics = useMemo(() => {
@@ -1749,7 +1798,7 @@
                             <div>
                               <span>Drive'da bu cihazdakinden daha yeni bir kayıt var!</span>
                               <span className="block text-[10px] font-normal text-amber-700 dark:text-amber-300 mt-0.5">
-                                'Drive'dan Al' butonuna basarak güncel verileri yükleyebilirsiniz.
+                                &quot;Drive&apos;dan Al&quot; butonuna basarak güncel verileri yükleyebilirsiniz.
                               </span>
                             </div>
                           </div>
@@ -4623,11 +4672,11 @@
                       <ol className="list-decimal list-inside space-y-1 pl-1 text-[11px]">
                         <li><strong>console.cloud.google.com</strong> adresine Google hesabınızla girin.</li>
                         <li>Yukarıdan yeni bir proje açın (veya mevcut projenizi seçin).</li>
-                        <li><strong>APIs & Services &gt; Enabled APIs & Services &gt; + Enable APIs</strong> kısmından <strong>Google Drive API</strong>'yi aratıp etkinleştirin.</li>
+                        <li><strong>APIs &amp; Services &gt; Enabled APIs &amp; Services &gt; + Enable APIs</strong> kısmından <strong>Google Drive API</strong>&apos;yi aratıp etkinleştirin.</li>
                         <li><strong>OAuth Consent Screen</strong> sayfasına girip Kullanıcı Türünü <strong>External</strong> seçin. Uygulama adına <strong>Saka Defteri</strong> yazıp kaydedin.</li>
                         <li><strong>Credentials &gt; Create Credentials &gt; OAuth client ID</strong> tıklayın. Uygulama türünü <strong>Web application</strong> seçin.</li>
                         <li><strong>Authorized JavaScript origins</strong> alanına GitHub Pages adresinizi ekleyin (ör: <code>https://kullaniciadi.github.io</code>).</li>
-                        <li>Kaydet'e basın. GitHub Pages sayfanızda 'Google Drive'a Bağlan' butonuna basarak yetki verip eşitlemeyi kullanmaya başlayabilirsiniz.</li>
+                        <li>Kaydet&apos;e basın. GitHub Pages sayfanızda &quot;Google Drive&apos;a Bağlan&quot; butonuna basarak yetki verip eşitlemeyi kullanmaya başlayabilirsiniz.</li>
                       </ol>
                     </div>
                   )}
@@ -4719,9 +4768,57 @@
       );
     }
 
+    // React Error Boundary
+    class ErrorBoundary extends React.Component {
+      constructor(props) {
+        super(props);
+        this.state = { hasError: false, error: null };
+      }
+      static getDerivedStateFromError(error) {
+        return { hasError: true, error: error };
+      }
+      componentDidCatch(error, errorInfo) {
+        console.error('React ErrorBoundary:', error, errorInfo);
+      }
+      render() {
+        if (this.state.hasError) {
+          return (
+            <div className="min-h-screen bg-slate-900 text-white flex items-center justify-center p-4">
+              <div className="max-w-lg w-full bg-rose-950/90 border-2 border-rose-500 rounded-3xl p-6 text-rose-100 space-y-4 shadow-2xl">
+                <h2 className="text-lg font-black text-white flex items-center gap-2">
+                  <span>⚠️ Uygulama Hatası</span>
+                </h2>
+                <p className="text-xs text-rose-200">
+                  Uygulama çalışırken beklenmedik bir hata ile karşılaşıldı:
+                </p>
+                <pre className="bg-rose-900/60 p-3 rounded-xl border border-rose-800 text-[11px] font-mono whitespace-pre-wrap overflow-x-auto text-rose-200">
+                  {String(this.state.error ? (this.state.error.stack || this.state.error.message || this.state.error) : 'Bilinmeyen hata')}
+                </pre>
+                <div className="flex gap-2 pt-2">
+                  <button
+                    onClick={() => window.location.reload()}
+                    className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold rounded-xl cursor-pointer"
+                  >
+                    Sayfayı Yenile
+                  </button>
+                  <button
+                    onClick={() => { localStorage.clear(); sessionStorage.clear(); window.location.reload(); }}
+                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-rose-300 text-xs font-bold rounded-xl cursor-pointer"
+                  >
+                    Önbelleği Sıfırla
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        }
+        return this.props.children;
+      }
+    }
+
     // Mount App
     const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<App />);
+    root.render(<ErrorBoundary><App /></ErrorBoundary>);
   </script>
 </body>
 </html>
