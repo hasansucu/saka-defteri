@@ -148,6 +148,8 @@
     const PIN_LEN_KEY = 'saka_defteri_pin_len_v1';
     const LOCKOUT_KEY = 'saka_defteri_lockout_until';
     const FAILED_ATTEMPTS_KEY = 'saka_defteri_failed_attempts';
+    const AUTO_BACKUP_KEY = 'saka_defteri_auto_backup_v1';
+    const LAST_SYNC_SUMMARY_KEY = 'saka_defteri_last_sync_summary_v1';
     const DEFAULT_PROJECTS = ['Sucum Nerede'];
 
     function bufferToBase64(buffer) {
@@ -279,31 +281,166 @@
       localStorage.removeItem(FAILED_ATTEMPTS_KEY);
     }
 
-    // --- DATA NORMALIZATION & MIGRATION ---
+    function getLastSyncSummary() {
+      try {
+        const raw = localStorage.getItem(LAST_SYNC_SUMMARY_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch {
+        return null;
+      }
+    }
+
+    function setLastSyncSummary(summary) {
+      try {
+        localStorage.setItem(LAST_SYNC_SUMMARY_KEY, JSON.stringify(summary));
+      } catch {}
+    }
+
+    function getAutoLocalBackup() {
+      try {
+        const raw = localStorage.getItem(AUTO_BACKUP_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch {
+        return null;
+      }
+    }
+
+    async function createAutoLocalBackup(appDataObj, activeKey) {
+      try {
+        const salt = getStoredSalt();
+        if (!salt) return null;
+        const encrypted = await encryptAppData(appDataObj, activeKey);
+        const payload = {
+          format: 'saka-defteri-backup',
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          autoSyncBackup: true,
+          salt: bufferToBase64(salt),
+          vault: encrypted,
+          sakaCount: (appDataObj.sakas || []).length,
+          noteCount: (appDataObj.notes || []).length
+        };
+        localStorage.setItem(AUTO_BACKUP_KEY, JSON.stringify(payload));
+        return payload;
+      } catch (err) {
+        console.warn('Otomatik yerel yedek oluşturulamadı:', err);
+        return null;
+      }
+    }
+
+    function downloadAutoLocalBackupFile(backup) {
+      const cleanPayload = {
+        format: 'saka-defteri-backup',
+        version: backup.version || 1,
+        exportedAt: backup.exportedAt,
+        salt: backup.salt,
+        vault: backup.vault
+      };
+      const d = new Date(backup.exportedAt);
+      const datePart = isNaN(d.getTime())
+        ? new Date().toISOString().split('T')[0]
+        : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const filename = `saka-defteri-oto-yedek-${datePart}.saka`;
+      const blob = new Blob([JSON.stringify(cleanPayload, null, 2)], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    // --- DATA NORMALIZATION, MIGRATION & MERGE ---
     function normalizeAppData(data) {
       if (!data || typeof data !== 'object') {
         return createInitialAppData();
       }
+      const dataLastMod = typeof data.lastModified === 'number' ? data.lastModified : 0;
       const projects = Array.isArray(data.projects) && data.projects.length > 0
-        ? data.projects
+        ? [...data.projects]
         : [...DEFAULT_PROJECTS];
 
-      const notes = Array.isArray(data.notes) ? [...data.notes] : [];
-      const sakas = Array.isArray(data.sakas) ? data.sakas : [];
+      const notes = Array.isArray(data.notes) ? data.notes.map(n => ({ ...n })) : [];
+      const sakas = Array.isArray(data.sakas) ? data.sakas.map(s => ({ ...s })) : [];
 
-      for (const saka of sakas) {
+      const deletedAtMap = {};
+      if (data.deletedAtMap && typeof data.deletedAtMap === 'object') {
+        for (const [k, v] of Object.entries(data.deletedAtMap)) {
+          if (typeof v === 'number' && !isNaN(v) && v > 0) {
+            deletedAtMap[k] = v;
+          }
+        }
+      }
+
+      for (let sIdx = 0; sIdx < sakas.length; sIdx++) {
+        const saka = sakas[sIdx];
+        if (!saka.id) {
+          saka.id = 'saka-' + (saka.sakaNo || sIdx) + '-' + (saka.createdAt || 0);
+        }
+        if (!saka.createdAt) {
+          saka.createdAt = dataLastMod;
+        }
+        if (!saka.updatedAt) {
+          saka.updatedAt = saka.createdAt || dataLastMod;
+        }
         if (!saka.project) saka.project = 'Sucum Nerede';
 
+        saka.todos = Array.isArray(saka.todos)
+          ? saka.todos.map((t, idx) => ({
+              ...t,
+              id: t.id || 'todo-' + saka.id + '-' + idx + '-' + (t.createdAt || 0),
+              createdAt: t.createdAt || saka.createdAt || dataLastMod,
+              updatedAt: t.updatedAt || t.createdAt || saka.updatedAt || dataLastMod
+            }))
+          : [];
+
+        saka.transactions = Array.isArray(saka.transactions)
+          ? saka.transactions.map((tx, idx) => ({
+              ...tx,
+              id: tx.id || 'tx-' + saka.id + '-' + idx + '-' + (tx.createdAt || 0),
+              createdAt: tx.createdAt || saka.createdAt || dataLastMod,
+              updatedAt: tx.updatedAt || tx.createdAt || saka.updatedAt || dataLastMod
+            }))
+          : [];
+
+        if (!saka.setup || typeof saka.setup !== 'object') {
+          saka.setup = { seyirKaydi: false, guzergahCizildi: false, bildirimAyarlandi: false, musteriTanitildi: false };
+        } else {
+          saka.setup = { ...saka.setup };
+        }
+        if (Array.isArray(saka.setup.customItems)) {
+          saka.setup.customItems = saka.setup.customItems.map((c, idx) => ({
+            ...c,
+            id: c.id || 'custom-' + saka.id + '-' + idx,
+            updatedAt: c.updatedAt || saka.updatedAt || dataLastMod
+          }));
+        }
+
+        saka.notes = Array.isArray(saka.notes)
+          ? saka.notes.map((oldNote, idx) => ({
+              ...oldNote,
+              id: oldNote.id || 'snote-' + saka.id + '-' + idx + '-' + (oldNote.createdAt || 0),
+              createdAt: oldNote.createdAt || saka.createdAt || dataLastMod,
+              updatedAt: oldNote.updatedAt || oldNote.createdAt || saka.updatedAt || dataLastMod
+            }))
+          : [];
+
         // Migrate legacy saka.notes to unified global notes
-        if (Array.isArray(saka.notes) && saka.notes.length > 0) {
-          for (const oldNote of saka.notes) {
+        if (saka.notes.length > 0) {
+          for (let nIdx = 0; nIdx < saka.notes.length; nIdx++) {
+            const oldNote = saka.notes[nIdx];
             if (!oldNote || !oldNote.text) continue;
-            const exists = notes.some(n => n.id === oldNote.id || (n.text === oldNote.text && n.targetCustomerIds?.includes(saka.id)));
+            const migratedId = oldNote.id || ('migrated-' + saka.id + '-' + nIdx + '-' + (oldNote.createdAt || 0));
+            if (deletedAtMap['note:' + migratedId]) continue;
+            const exists = notes.some(n => n.id === migratedId || (n.text === oldNote.text && n.targetCustomerIds?.includes(saka.id)));
             if (!exists) {
               notes.push({
-                id: oldNote.id || 'migrated-' + Math.random().toString(36).slice(2, 7),
-                date: oldNote.date || toLocalDateString(new Date()),
-                createdAt: oldNote.createdAt || Date.now(),
+                id: migratedId,
+                date: oldNote.date || new Date(oldNote.createdAt || saka.createdAt || Date.now()).toISOString().split('T')[0],
+                createdAt: oldNote.createdAt || saka.createdAt || dataLastMod,
+                updatedAt: oldNote.updatedAt || oldNote.createdAt || saka.updatedAt || dataLastMod,
                 targetType: 'single',
                 targetCustomerIds: [saka.id],
                 targetCustomerNames: [saka.ownerName || ('#' + saka.sakaNo)],
@@ -317,10 +454,18 @@
         }
       }
 
-      // Migrate existing note types:
-      // "Müşteri İsteği" -> "Saka isteği / öneri" (saka_istegi)
-      // "Uygulama Eksiği/Hatası" -> "Yapılacak" (yapilacak)
-      for (const n of notes) {
+      // Backfill deterministic id & updatedAt and migrate existing note types
+      for (let i = 0; i < notes.length; i++) {
+        const n = notes[i];
+        if (!n.id) {
+          n.id = 'note-legacy-' + i + '-' + (n.createdAt || 0);
+        }
+        if (!n.createdAt) {
+          n.createdAt = dataLastMod;
+        }
+        if (!n.updatedAt) {
+          n.updatedAt = n.createdAt || dataLastMod;
+        }
         if (n.type === 'musteri_istegi') {
           n.type = 'saka_istegi';
         } else if (n.type === 'uygulama_eksigi' || n.type === 'uygulama_hatasi') {
@@ -338,8 +483,198 @@
         lastBackupSizeBytes: data.lastBackupSizeBytes,
         projects,
         notes,
-        sakas
+        sakas,
+        deletedAtMap
       };
+    }
+
+    function getCoreSakaSignature(saka) {
+      const { todos, transactions, notes, setup, updatedAt, ...rest } = saka;
+      const { customItems, ...restSetup } = setup || {};
+      return JSON.stringify({ ...rest, setup: restSetup });
+    }
+
+    function mergeItemArrays(localItems, remoteItems, keyPrefix, deletedAtMap, counts) {
+      const localMap = new Map();
+      const remoteMap = new Map();
+      for (const item of localItems) localMap.set(item.id, item);
+      for (const item of remoteItems) remoteMap.set(item.id, item);
+
+      const allIds = new Set([...localMap.keys(), ...remoteMap.keys()]);
+      const result = [];
+
+      for (const id of allIds) {
+        const lItem = localMap.get(id);
+        const rItem = remoteMap.get(id);
+        const delKey = keyPrefix + ':' + id;
+        const delAt = deletedAtMap[delKey] || 0;
+
+        if (lItem && rItem) {
+          const lUpd = lItem.updatedAt || lItem.createdAt || 0;
+          const rUpd = rItem.updatedAt || rItem.createdAt || 0;
+          const maxUpd = Math.max(lUpd, rUpd);
+          if (delAt >= maxUpd && delAt > 0) {
+            counts.deleted++;
+            continue;
+          }
+          if (maxUpd > delAt && deletedAtMap[delKey]) {
+            delete deletedAtMap[delKey];
+          }
+          if (rUpd > lUpd) {
+            result.push({ ...rItem });
+            if (JSON.stringify({ ...lItem, updatedAt: 0 }) !== JSON.stringify({ ...rItem, updatedAt: 0 })) {
+              counts.updated++;
+            }
+          } else {
+            result.push({ ...lItem });
+          }
+        } else if (rItem) {
+          const rUpd = rItem.updatedAt || rItem.createdAt || 0;
+          if (delAt >= rUpd && delAt > 0) {
+            continue;
+          }
+          if (rUpd > delAt && deletedAtMap[delKey]) {
+            delete deletedAtMap[delKey];
+          }
+          result.push({ ...rItem });
+          counts.added++;
+        } else if (lItem) {
+          const lUpd = lItem.updatedAt || lItem.createdAt || 0;
+          if (delAt >= lUpd && delAt > 0) {
+            counts.deleted++;
+            continue;
+          }
+          if (lUpd > delAt && deletedAtMap[delKey]) {
+            delete deletedAtMap[delKey];
+          }
+          result.push({ ...lItem });
+        }
+      }
+      return result;
+    }
+
+    function mergeAppData(localRaw, remoteRaw) {
+      const local = normalizeAppData(localRaw);
+      const remote = normalizeAppData(remoteRaw);
+      const summary = { added: 0, updated: 0, deleted: 0 };
+
+      const mergedDeletedAtMap = { ...(local.deletedAtMap || {}) };
+      for (const [key, ts] of Object.entries(remote.deletedAtMap || {})) {
+        if (typeof ts === 'number' && ts > (mergedDeletedAtMap[key] || 0)) {
+          mergedDeletedAtMap[key] = ts;
+        }
+      }
+
+      const localSakaMap = new Map();
+      const remoteSakaMap = new Map();
+      for (const s of local.sakas) localSakaMap.set(s.id, s);
+      for (const s of remote.sakas) remoteSakaMap.set(s.id, s);
+
+      const allSakaIds = new Set([...localSakaMap.keys(), ...remoteSakaMap.keys()]);
+      const mergedSakas = [];
+
+      for (const id of allSakaIds) {
+        const lSaka = localSakaMap.get(id);
+        const rSaka = remoteSakaMap.get(id);
+        const delKey = 'saka:' + id;
+        const delAt = mergedDeletedAtMap[delKey] || 0;
+
+        if (lSaka && rSaka) {
+          const lUpd = lSaka.updatedAt || lSaka.createdAt || 0;
+          const rUpd = rSaka.updatedAt || rSaka.createdAt || 0;
+          const maxUpd = Math.max(lUpd, rUpd);
+
+          if (delAt >= maxUpd && delAt > 0) {
+            summary.deleted++;
+            continue;
+          }
+          if (maxUpd > delAt && mergedDeletedAtMap[delKey]) {
+            delete mergedDeletedAtMap[delKey];
+          }
+
+          const baseWinner = rUpd > lUpd ? rSaka : lSaka;
+          const coreChangedFromRemote =
+            rUpd > lUpd && getCoreSakaSignature(lSaka) !== getCoreSakaSignature(rSaka);
+          if (coreChangedFromRemote) {
+            summary.updated++;
+          }
+
+          const mergedTodos = mergeItemArrays(lSaka.todos || [], rSaka.todos || [], 'todo:' + id, mergedDeletedAtMap, summary);
+          const mergedTransactions = mergeItemArrays(lSaka.transactions || [], rSaka.transactions || [], 'tx:' + id, mergedDeletedAtMap, summary);
+          const mergedCustomItems = mergeItemArrays(lSaka.setup?.customItems || [], rSaka.setup?.customItems || [], 'setup:' + id, mergedDeletedAtMap, summary);
+          const silentCounts = { added: 0, updated: 0, deleted: 0 };
+          const mergedLegacyNotes = mergeItemArrays(lSaka.notes || [], rSaka.notes || [], 'snote:' + id, mergedDeletedAtMap, silentCounts);
+
+          mergedSakas.push({
+            ...baseWinner,
+            setup: {
+              ...baseWinner.setup,
+              customItems: mergedCustomItems
+            },
+            todos: mergedTodos,
+            transactions: mergedTransactions,
+            notes: mergedLegacyNotes,
+            updatedAt: maxUpd
+          });
+        } else if (rSaka) {
+          const rUpd = rSaka.updatedAt || rSaka.createdAt || 0;
+          if (delAt >= rUpd && delAt > 0) {
+            continue;
+          }
+          if (rUpd > delAt && mergedDeletedAtMap[delKey]) {
+            delete mergedDeletedAtMap[delKey];
+          }
+          const silentCounts = { added: 0, updated: 0, deleted: 0 };
+          const cleanedTodos = mergeItemArrays([], rSaka.todos || [], 'todo:' + id, mergedDeletedAtMap, silentCounts);
+          const cleanedTx = mergeItemArrays([], rSaka.transactions || [], 'tx:' + id, mergedDeletedAtMap, silentCounts);
+          const cleanedCustom = mergeItemArrays([], rSaka.setup?.customItems || [], 'setup:' + id, mergedDeletedAtMap, silentCounts);
+
+          mergedSakas.push({
+            ...rSaka,
+            setup: {
+              ...rSaka.setup,
+              customItems: cleanedCustom
+            },
+            todos: cleanedTodos,
+            transactions: cleanedTx
+          });
+          summary.added++;
+        } else if (lSaka) {
+          const lUpd = lSaka.updatedAt || lSaka.createdAt || 0;
+          if (delAt >= lUpd && delAt > 0) {
+            summary.deleted++;
+            continue;
+          }
+          if (lUpd > delAt && mergedDeletedAtMap[delKey]) {
+            delete mergedDeletedAtMap[delKey];
+          }
+          mergedSakas.push({ ...lSaka });
+        }
+      }
+
+      const mergedNotes = mergeItemArrays(local.notes || [], remote.notes || [], 'note', mergedDeletedAtMap, summary);
+      mergedNotes.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+      const mergedProjects = Array.from(new Set([...(local.projects || DEFAULT_PROJECTS), ...(remote.projects || [])]));
+      if (mergedProjects.length === 0) mergedProjects.push(...DEFAULT_PROJECTS);
+
+      const localBackupTs = local.lastBackupDate ? new Date(local.lastBackupDate).getTime() : 0;
+      const remoteBackupTs = remote.lastBackupDate ? new Date(remote.lastBackupDate).getTime() : 0;
+      const useRemoteBackupMeta = remoteBackupTs > localBackupTs;
+
+      const mergedData = {
+        version: Math.max(local.version || 1, remote.version || 1),
+        canary: CANARY_STRING,
+        lastModified: Date.now(),
+        lastBackupDate: useRemoteBackupMeta ? remote.lastBackupDate : local.lastBackupDate,
+        lastBackupSizeBytes: useRemoteBackupMeta ? remote.lastBackupSizeBytes : local.lastBackupSizeBytes,
+        projects: mergedProjects,
+        notes: mergedNotes,
+        sakas: mergedSakas,
+        deletedAtMap: mergedDeletedAtMap
+      };
+
+      return { mergedData, summary };
     }
 
     function findNonSucumRecords(data) {
@@ -542,7 +877,8 @@
         lastBackupDate: null,
         projects: [...DEFAULT_PROJECTS],
         notes: [],
-        sakas: []
+        sakas: [],
+        deletedAtMap: {}
       };
     }
 
@@ -965,6 +1301,22 @@
         </svg>
       );
     }
+    function IconRefreshCw({ className = "w-4 h-4" }) {
+      return (
+        <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M23 4v6h-6M1 20v-6h6" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
+        </svg>
+      );
+    }
+    function IconRotateCcw({ className = "w-4 h-4" }) {
+      return (
+        <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M1 4v6h6" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.51 15a9 9 0 102.13-9.36L1 10" />
+        </svg>
+      );
+    }
 
     // --- GOOGLE DRIVE SYNC HELPERS (GIS + REST) ---
     const GOOGLE_CLIENT_ID = '224371734433-bjr7u11sj3n2u0qb3p3mabcdcifh90av.apps.googleusercontent.com';
@@ -1040,6 +1392,28 @@
       });
       if (!res.ok) throw new Error('Drive dosyası indirilemedi.');
       return await res.json();
+    }
+
+    async function decryptDrivePayload(payload, activeKey, alternativePin, currentPin) {
+      if (!payload || !payload.salt || !payload.vault) {
+        throw new Error("Drive'daki eşitleme dosyası okunamadı.");
+      }
+      const salt = base64ToBuffer(payload.salt);
+      if (alternativePin && alternativePin.length === 6) {
+        const altKey = await deriveKey(alternativePin, salt);
+        return await decryptAppData(payload.vault, altKey);
+      }
+      try {
+        return await decryptAppData(payload.vault, activeKey);
+      } catch {
+        if (currentPin && currentPin.length === 6) {
+          try {
+            const samePinKey = await deriveKey(currentPin, salt);
+            return await decryptAppData(payload.vault, samePinKey);
+          } catch {}
+        }
+        throw new Error('PIN_HATASI');
+      }
     }
 
     async function uploadAppDataToDrive(data, key, saltBuffer) {
@@ -1132,8 +1506,10 @@
       const [isDriveSyncing, setIsDriveSyncing] = useState(false);
       const [lastSyncDate, setLastSyncDate] = useState(() => localStorage.getItem('saka_defteri_last_sync_date'));
       const [lastSyncDevice, setLastSyncDevice] = useState(() => localStorage.getItem('saka_defteri_last_sync_device'));
+      const [lastSyncSummary, setLastSyncSummaryState] = useState(getLastSyncSummary);
+      const [autoLocalBackup, setAutoLocalBackupState] = useState(getAutoLocalBackup);
       const [deviceName, setDeviceNameState] = useState(getDeviceName);
-      const [drivePullModalData, setDrivePullModalData] = useState({ isOpen: false, payload: null, isAutoPrompt: false });
+      const [drivePullModalData, setDrivePullModalData] = useState({ isOpen: false, payload: null, isAutoPrompt: false, needsPin: false });
       const [hasNewerOnDrive, setHasNewerOnDrive] = useState(false);
       const [isDriveMenuOpen, setIsDriveMenuOpen] = useState(false);
       const [autoLockSetting, setAutoLockSetting] = useState(() => localStorage.getItem('saka_defteri_autolock_setting') || '5m');
@@ -1379,18 +1755,17 @@
             setLegacyConflict(nonSucum);
           }
 
-          // Check if Google Drive has newer records
+          // Check if Google Drive has newer records (non-blocking indicator only)
           if (localStorage.getItem('saka_defteri_drive_connected') === 'true') {
             requestDriveToken(false).then(async (token) => {
               if (!token) return;
               try {
                 const payload = await fetchDriveSyncPayload(token);
-                if (payload && payload.exportedAt) {
-                  const driveTime = new Date(payload.exportedAt).getTime();
+                if (payload && (payload.lastModified || payload.exportedAt)) {
+                  const driveTime = payload.lastModified || new Date(payload.exportedAt).getTime();
                   const localTime = decrypted.lastModified || (decrypted.lastBackupDate ? new Date(decrypted.lastBackupDate).getTime() : 0);
                   if (driveTime > localTime + 30000) {
                     setHasNewerOnDrive(true);
-                    setDrivePullModalData({ isOpen: true, payload, isAutoPrompt: true });
                   }
                 }
               } catch (e) {}
@@ -1550,53 +1925,79 @@
         e.target.value = '';
       };
 
+      // Save AppData with fresh lastModified
+      const persistAppData = async (updated) => {
+        if (!activeKeyRef.current) return;
+        const normalized = normalizeAppData({
+          ...updated,
+          lastModified: Date.now()
+        });
+        const encrypted = await encryptAppData(normalized, activeKeyRef.current);
+        saveStoredVault(encrypted);
+        setAppData(normalized);
+      };
+
       // Global Notes handlers
       const handleSaveNote = (note) => {
+        const now = Date.now();
+        const noteWithTs = { ...note, updatedAt: now };
         const existingIdx = (appData.notes || []).findIndex(n => n.id === note.id);
         let updatedNotes;
         if (existingIdx >= 0) {
           updatedNotes = [...(appData.notes || [])];
-          updatedNotes[existingIdx] = note;
+          updatedNotes[existingIdx] = noteWithTs;
         } else {
-          updatedNotes = [note, ...(appData.notes || [])];
+          updatedNotes = [noteWithTs, ...(appData.notes || [])];
         }
-        saveAppData({ ...appData, notes: updatedNotes });
+        const nextDeletedAtMap = { ...(appData.deletedAtMap || {}) };
+        delete nextDeletedAtMap['note:' + note.id];
+        persistAppData({ ...appData, notes: updatedNotes, deletedAtMap: nextDeletedAtMap });
         showToast('Not kaydedildi!', 'success');
       };
 
       const handleStatusChangeNote = (noteId, newStatus) => {
-        const updatedNotes = (appData.notes || []).map(n => n.id === noteId ? { ...n, status: newStatus } : n);
-        saveAppData({ ...appData, notes: updatedNotes });
+        const now = Date.now();
+        const updatedNotes = (appData.notes || []).map(n => n.id === noteId ? { ...n, status: newStatus, updatedAt: now } : n);
+        persistAppData({ ...appData, notes: updatedNotes });
         showToast('Not durumu güncellendi.', 'info');
       };
 
       const handleDeleteNote = (noteId) => {
         const updatedNotes = (appData.notes || []).filter(n => n.id !== noteId);
-        saveAppData({ ...appData, notes: updatedNotes });
+        const nextDeletedAtMap = {
+          ...(appData.deletedAtMap || {}),
+          ['note:' + noteId]: Date.now()
+        };
+        persistAppData({ ...appData, notes: updatedNotes, deletedAtMap: nextDeletedAtMap });
         showToast('Not silindi.', 'info');
       };
 
       const handleMigrateLegacyRecords = () => {
         if (!appData) return;
-        const updatedSakas = appData.sakas.map(s => ({ ...s, project: 'Sucum Nerede' }));
-        const updatedNotes = (appData.notes || []).map(n => ({ ...n, project: 'Sucum Nerede' }));
-        saveAppData({ ...appData, sakas: updatedSakas, notes: updatedNotes });
+        const now = Date.now();
+        const updatedSakas = appData.sakas.map(s => ({ ...s, project: 'Sucum Nerede', updatedAt: now }));
+        const updatedNotes = (appData.notes || []).map(n => ({ ...n, project: 'Sucum Nerede', updatedAt: now }));
+        persistAppData({ ...appData, sakas: updatedSakas, notes: updatedNotes });
         setLegacyConflict(null);
         showToast('Eski kayıtlar Sucum Nerede sakası olarak korundu.', 'success');
       };
 
       const handleDeleteLegacyRecords = () => {
         if (!appData || !legacyConflict) return;
+        const now = Date.now();
         const removeSakaIds = new Set(legacyConflict.sakas.map(s => s.id));
         const removeNoteIds = new Set(legacyConflict.notes.map(n => n.id));
+        const nextDeletedAtMap = { ...(appData.deletedAtMap || {}) };
+        removeSakaIds.forEach(id => { nextDeletedAtMap['saka:' + id] = now; });
+        removeNoteIds.forEach(id => { nextDeletedAtMap['note:' + id] = now; });
         const remainingSakas = appData.sakas.filter(s => !removeSakaIds.has(s.id));
         const remainingNotes = (appData.notes || []).filter(n => !removeNoteIds.has(n.id));
-        saveAppData({ ...appData, sakas: remainingSakas, notes: remainingNotes });
+        persistAppData({ ...appData, sakas: remainingSakas, notes: remainingNotes, deletedAtMap: nextDeletedAtMap });
         setLegacyConflict(null);
         showToast('Eski projelere ait kayıtlar silindi.', 'info');
       };
 
-      // Google Drive Handlers
+      // Google Drive Handlers (Two-Way Merge)
       const handleConnectDrive = async () => {
         try {
           setIsDriveSyncing(true);
@@ -1605,10 +2006,12 @@
           localStorage.setItem('saka_defteri_drive_connected', 'true');
           showToast('Google Drive bağlantısı başarılı!', 'success');
 
-          const payload = await fetchDriveSyncPayload(token);
-          if (payload) {
-            setDrivePullModalData({ isOpen: true, payload, isAutoPrompt: true });
-          }
+          try {
+            const payload = await fetchDriveSyncPayload(token);
+            if (payload && (payload.lastModified || payload.exportedAt)) {
+              setHasNewerOnDrive(true);
+            }
+          } catch {}
         } catch (err) {
           showToast('Google Drive bağlantısı kurulamadı: ' + (err.message || 'Hata'), 'error');
         } finally {
@@ -1629,40 +2032,47 @@
         showToast('Cihaz adı kaydedildi.', 'success');
       };
 
-      const handleDrivePush = async () => {
-        if (!appData || !activePin || !activeKeyRef.current) return;
-        setIsDriveSyncing(true);
+      const applyMergeAndUpload = async (remoteData) => {
+        if (!appData || !activeKeyRef.current) return;
+        const salt = getStoredSalt();
+        if (!salt) throw new Error('Şifreleme anahtarı bulunamadı.');
+
+        const { mergedData, summary } = mergeAppData(appData, remoteData);
+        await persistAppData(mergedData);
+
+        let payload;
         try {
-          const salt = getStoredSalt();
-          if (!salt) throw new Error('Şifreleme anahtarı bulunamadı.');
-          const payload = await uploadAppDataToDrive(appData, activeKeyRef.current, salt);
-          setLastSyncDate(payload.exportedAt);
-          setLastSyncDevice(deviceName);
-          setHasNewerOnDrive(false);
-          showToast("Kayıtlar PIN ile şifrelenerek Google Drive'a yüklendi!", 'success');
+          payload = await uploadAppDataToDrive(mergedData, activeKeyRef.current, salt);
         } catch (err) {
           if (err.message === 'OTURUM_ZAMAN_ASIMI') {
-            try {
-              const token = await requestDriveToken(true);
-              const salt = getStoredSalt();
-              const payload = await uploadAppDataToDrive(appData, activeKeyRef.current, salt);
-              setLastSyncDate(payload.exportedAt);
-              setLastSyncDevice(deviceName);
-              setHasNewerOnDrive(false);
-              showToast("Kayıtlar PIN ile şifrelenerek Google Drive'a yüklendi!", 'success');
-              return;
-            } catch (e) {
-              showToast('Drive oturum yenileme başarısız oldu.', 'error');
-              return;
-            }
+            await requestDriveToken(true);
+            payload = await uploadAppDataToDrive(mergedData, activeKeyRef.current, salt);
+          } else {
+            throw err;
           }
-          showToast("Drive'a gönderme hatası: " + (err.message || ''), 'error');
-        } finally {
-          setIsDriveSyncing(false);
+        }
+
+        setLastSyncDate(payload.exportedAt);
+        setLastSyncDevice(deviceName);
+        const syncSummary = {
+          date: new Date().toISOString(),
+          added: summary.added,
+          updated: summary.updated,
+          deleted: summary.deleted
+        };
+        setLastSyncSummary(syncSummary);
+        setLastSyncSummaryState(syncSummary);
+        setHasNewerOnDrive(false);
+
+        if (summary.added === 0 && summary.updated === 0 && summary.deleted === 0) {
+          showToast('Eşitleme tamamlandı: Her iki taraf güncel (0 eklendi, 0 güncellendi, 0 silindi).', 'success');
+        } else {
+          showToast(`Eşitleme tamamlandı: ${summary.added} eklendi, ${summary.updated} güncellendi, ${summary.deleted} silindi.`, 'success');
         }
       };
 
-      const handleDrivePull = async () => {
+      const handleSyncDrive = async () => {
+        if (!appData || !activeKeyRef.current) return;
         setIsDriveSyncing(true);
         try {
           let token;
@@ -1671,44 +2081,118 @@
           } catch {
             token = await requestDriveToken(true);
           }
-          const payload = await fetchDriveSyncPayload(token);
+          setIsDriveConnected(true);
+          localStorage.setItem('saka_defteri_drive_connected', 'true');
+
+          // 1. Eşitlemeden önce otomatik yerel yedek al
+          const backup = await createAutoLocalBackup(appData, activeKeyRef.current);
+          if (backup) setAutoLocalBackupState(backup);
+
+          // 2. Drive dosyasını indir
+          let payload;
+          try {
+            payload = await fetchDriveSyncPayload(token);
+          } catch (err) {
+            if (err.message === 'OTURUM_ZAMAN_ASIMI') {
+              token = await requestDriveToken(true);
+              payload = await fetchDriveSyncPayload(token);
+            } else {
+              throw err;
+            }
+          }
+
           if (!payload) {
-            showToast("Google Drive'da henüz kayıt bulunamadı. Önce diğer cihazdan gönderin.", 'info');
+            const salt = getStoredSalt();
+            if (!salt) throw new Error('Şifreleme anahtarı bulunamadı.');
+            const normalizedLocal = normalizeAppData(appData);
+            const upPayload = await uploadAppDataToDrive(normalizedLocal, activeKeyRef.current, salt);
+            setLastSyncDate(upPayload.exportedAt);
+            setLastSyncDevice(deviceName);
+            const initSummary = {
+              date: new Date().toISOString(),
+              added: 0,
+              updated: 0,
+              deleted: 0,
+              isInitialUpload: true
+            };
+            setLastSyncSummary(initSummary);
+            setLastSyncSummaryState(initSummary);
+            setHasNewerOnDrive(false);
+            showToast("İlk eşitleme tamamlandı! Kayıtlar PIN ile şifrelenerek Google Drive'a gönderildi.", 'success');
             return;
           }
-          setDrivePullModalData({ isOpen: true, payload, isAutoPrompt: false });
+
+          // 3. Drive dosyasını aç ve birleştir
+          let remoteData;
+          try {
+            remoteData = await decryptDrivePayload(payload, activeKeyRef.current, undefined, activePin);
+          } catch (err) {
+            if (err && err.message === 'PIN_HATASI') {
+              setDrivePullModalData({ isOpen: true, payload, isAutoPrompt: false, needsPin: true });
+              return;
+            }
+            throw err;
+          }
+
+          await applyMergeAndUpload(remoteData);
         } catch (err) {
-          showToast("Drive'dan alma hatası: " + (err.message || ''), 'error');
+          if (err && err.message === 'OTURUM_ZAMAN_ASIMI') {
+            showToast('Drive oturumu yenilenmeli, tekrar deneyin.', 'error');
+          } else {
+            showToast('Eşitleme hatası: ' + (err?.message || 'Hata'), 'error');
+          }
         } finally {
           setIsDriveSyncing(false);
         }
       };
 
-      const handleConfirmDrivePull = async (payload, altPin) => {
+      const handleConfirmMergeWithPin = async (altPin) => {
+        if (!drivePullModalData.payload || !activeKeyRef.current || !appData) return false;
+        setIsDriveSyncing(true);
         try {
-          const pinToUse = (altPin && altPin.length === 6) ? altPin : activePin;
-          const salt = base64ToBuffer(payload.salt);
-          const key = await deriveKey(pinToUse, salt);
-          const decrypted = await decryptAppData(payload.vault, key);
+          const backup = await createAutoLocalBackup(appData, activeKeyRef.current);
+          if (backup) setAutoLocalBackupState(backup);
 
-          saveStoredSalt(salt);
-          saveStoredVault(payload.vault);
-          activeKeyRef.current = key;
-          setActivePin(pinToUse);
-          setAppData(decrypted);
-
-          setLastSyncDate(payload.exportedAt);
-          setLastSyncDevice(payload.deviceInfo?.name || 'Diğer Cihaz');
-          localStorage.setItem('saka_defteri_last_sync_date', payload.exportedAt);
-          if (payload.deviceInfo?.name) {
-            localStorage.setItem('saka_defteri_last_sync_device', payload.deviceInfo.name);
-          }
-
-          setHasNewerOnDrive(false);
-          setDrivePullModalData({ isOpen: false, payload: null, isAutoPrompt: false });
-          showToast("Kayıtlar Google Drive'dan başarıyla alındı ve güncellendi!", 'success');
+          const remoteData = await decryptDrivePayload(drivePullModalData.payload, activeKeyRef.current, altPin, activePin);
+          await applyMergeAndUpload(remoteData);
+          setDrivePullModalData({ isOpen: false, payload: null, isAutoPrompt: false, needsPin: false });
+          return true;
         } catch (err) {
           showToast('Drive kaydı açılamadı! PIN kodu bu dosyanın şifresiyle uyuşmuyor.', 'error');
+          return false;
+        } finally {
+          setIsDriveSyncing(false);
+        }
+      };
+
+      const handleDownloadAutoBackup = () => {
+        if (!autoLocalBackup) return;
+        downloadAutoLocalBackupFile(autoLocalBackup);
+        showToast('Eşitleme öncesi otomatik yedek indirildi.', 'success');
+      };
+
+      const handleRestoreAutoBackup = async () => {
+        if (!autoLocalBackup || !activeKeyRef.current) return;
+        try {
+          const salt = base64ToBuffer(autoLocalBackup.salt);
+          let decrypted;
+          try {
+            decrypted = await decryptAppData(autoLocalBackup.vault, activeKeyRef.current);
+          } catch {
+            if (activePin && activePin.length === 6) {
+              const key = await deriveKey(activePin, salt);
+              decrypted = await decryptAppData(autoLocalBackup.vault, key);
+              activeKeyRef.current = key;
+              saveStoredSalt(salt);
+            } else {
+              throw new Error('PIN uyuşmadı');
+            }
+          }
+          await persistAppData(decrypted);
+          setIsSettingsOpen(false);
+          showToast('Eşitleme öncesi yerel yedeğe geri dönüldü!', 'success');
+        } catch {
+          showToast('Otomatik yedek açılamadı. PIN değiştirilmiş olabilir.', 'error');
         }
       };
 
@@ -1909,9 +2393,9 @@
                           <div className="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200 text-[11px] font-bold flex items-start gap-2">
                             <IconAlert className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
                             <div>
-                              <span>Drive'da bu cihazdakinden daha yeni bir kayıt var!</span>
+                              <span>Drive&apos;da yeni değişiklikler var!</span>
                               <span className="block text-[10px] font-normal text-amber-700 dark:text-amber-300 mt-0.5">
-                                &quot;Drive&apos;dan Al&quot; butonuna basarak güncel verileri yükleyebilirsiniz.
+                                &quot;Eşitle&quot; butonuna basarak iki taraftaki kayıtları güvenle birleştirebilirsiniz.
                               </span>
                             </div>
                           </div>
@@ -1932,33 +2416,36 @@
                           )}
                         </div>
 
-                        {isDriveConnected ? (
-                          <div className="grid grid-cols-2 gap-2 pt-1">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setIsDriveMenuOpen(false);
-                                handleDrivePush();
-                              }}
-                              disabled={isDriveSyncing}
-                              className="px-3 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50 active:scale-95 transition-all"
-                            >
-                              <IconCloudUpload className="w-3.5 h-3.5" />
-                              <span>{isDriveSyncing ? 'İşleniyor...' : "Drive'a Gönder"}</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setIsDriveMenuOpen(false);
-                                handleDrivePull();
-                              }}
-                              disabled={isDriveSyncing}
-                              className="px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 font-bold text-xs flex items-center justify-center gap-1.5 border border-slate-200 dark:border-slate-700 cursor-pointer disabled:opacity-50 active:scale-95 transition-all"
-                            >
-                              <IconCloudDownload className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
-                              <span>{"Drive'dan Al"}</span>
-                            </button>
+                        {lastSyncSummary && (
+                          <div className="p-2 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200/80 dark:border-slate-700/80 text-[10px] text-slate-600 dark:text-slate-300 flex items-center justify-between">
+                            <span className="font-semibold">Son özet:</span>
+                            {lastSyncSummary.isInitialUpload ? (
+                              <span className="font-bold text-sky-600 dark:text-sky-400">İlk yükleme yapıldı</span>
+                            ) : (
+                              <span className="font-mono font-bold">
+                                <span className="text-emerald-600 dark:text-emerald-400">+{lastSyncSummary.added}</span>
+                                {' • '}
+                                <span className="text-sky-600 dark:text-sky-400">{lastSyncSummary.updated} günc.</span>
+                                {' • '}
+                                <span className="text-rose-600 dark:text-rose-400">{lastSyncSummary.deleted} sil.</span>
+                              </span>
+                            )}
                           </div>
+                        )}
+
+                        {isDriveConnected ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIsDriveMenuOpen(false);
+                              handleSyncDrive();
+                            }}
+                            disabled={isDriveSyncing}
+                            className="w-full px-3 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50 active:scale-95 transition-all"
+                          >
+                            <IconRefreshCw className={`w-4 h-4 ${isDriveSyncing ? 'animate-spin' : ''}`} />
+                            <span>{isDriveSyncing ? 'Eşitleniyor...' : 'Eşitle'}</span>
+                          </button>
                         ) : (
                           <button
                             type="button"
@@ -2281,20 +2768,47 @@
               globalNotes={appData.notes || []}
               onClose={() => setSelectedSaka(null)}
               onSave={(updatedSaka) => {
-                const exists = appData.sakas.some(s => s.id === updatedSaka.id);
-                let newSakas;
-                if (exists) {
-                  newSakas = appData.sakas.map(s => s.id === updatedSaka.id ? updatedSaka : s);
-                } else {
-                  newSakas = [...appData.sakas, updatedSaka];
+                const now = Date.now();
+                const sakaToSave = { ...updatedSaka, updatedAt: now };
+                const prevSaka = appData.sakas.find(s => s.id === sakaToSave.id);
+                const nextDeletedAtMap = { ...(appData.deletedAtMap || {}) };
+                delete nextDeletedAtMap['saka:' + sakaToSave.id];
+
+                if (prevSaka) {
+                  const nextTodoIds = new Set((sakaToSave.todos || []).map(t => t.id));
+                  for (const oldT of prevSaka.todos || []) {
+                    if (!nextTodoIds.has(oldT.id)) nextDeletedAtMap['todo:' + sakaToSave.id + ':' + oldT.id] = now;
+                  }
+                  const nextTxIds = new Set((sakaToSave.transactions || []).map(tx => tx.id));
+                  for (const oldTx of prevSaka.transactions || []) {
+                    if (!nextTxIds.has(oldTx.id)) nextDeletedAtMap['tx:' + sakaToSave.id + ':' + oldTx.id] = now;
+                  }
+                  const nextCustomIds = new Set((sakaToSave.setup?.customItems || []).map(c => c.id));
+                  for (const oldC of prevSaka.setup?.customItems || []) {
+                    if (!nextCustomIds.has(oldC.id)) nextDeletedAtMap['setup:' + sakaToSave.id + ':' + oldC.id] = now;
+                  }
                 }
-                saveAppData({ ...appData, sakas: newSakas });
+                (sakaToSave.todos || []).forEach(t => delete nextDeletedAtMap['todo:' + sakaToSave.id + ':' + t.id]);
+                (sakaToSave.transactions || []).forEach(tx => delete nextDeletedAtMap['tx:' + sakaToSave.id + ':' + tx.id]);
+                (sakaToSave.setup?.customItems || []).forEach(c => delete nextDeletedAtMap['setup:' + sakaToSave.id + ':' + c.id]);
+
+                let newSakas;
+                if (prevSaka) {
+                  newSakas = appData.sakas.map(s => s.id === sakaToSave.id ? sakaToSave : s);
+                } else {
+                  newSakas = [...appData.sakas, sakaToSave];
+                }
+                persistAppData({ ...appData, sakas: newSakas, deletedAtMap: nextDeletedAtMap });
                 setSelectedSaka(null);
                 showToast('Kayıt kaydedildi.', 'success');
               }}
               onDelete={(id) => {
                 const newSakas = appData.sakas.filter(s => s.id !== id);
-                saveAppData({ ...appData, sakas: newSakas });
+                const nextDeletedAtMap = {
+                  ...(appData.deletedAtMap || {}),
+                  ['saka:' + id]: Date.now()
+                };
+                persistAppData({ ...appData, sakas: newSakas, deletedAtMap: nextDeletedAtMap });
                 setSelectedSaka(null);
                 showToast('Kayıt silindi.', 'info');
               }}
@@ -2425,19 +2939,20 @@
             </div>
           )}
 
-          {/* DRIVE PULL MODAL */}
+          {/* DRIVE PULL / PIN MERGE MODAL */}
           {drivePullModalData.isOpen && drivePullModalData.payload && (
             <DrivePullModal
               payload={drivePullModalData.payload}
               isAutoPrompt={drivePullModalData.isAutoPrompt}
+              needsPinInitially={!!drivePullModalData.needsPin}
               activePin={activePin}
               localSakaCount={appData?.sakas?.length || 0}
               localNoteCount={appData?.notes?.length || 0}
               localDeviceName={deviceName}
               lastSyncDate={lastSyncDate}
               localLastModified={appData?.lastModified || (appData?.lastBackupDate ? new Date(appData.lastBackupDate).getTime() : 0)}
-              onConfirm={handleConfirmDrivePull}
-              onClose={() => setDrivePullModalData({ isOpen: false, payload: null, isAutoPrompt: false })}
+              onConfirm={handleConfirmMergeWithPin}
+              onClose={() => setDrivePullModalData({ isOpen: false, payload: null, isAutoPrompt: false, needsPin: false })}
             />
           )}
 
@@ -2457,10 +2972,15 @@
               isDriveSyncing={isDriveSyncing}
               lastSyncDate={lastSyncDate}
               lastSyncDevice={lastSyncDevice}
+              lastSyncSummary={lastSyncSummary}
+              autoLocalBackup={autoLocalBackup}
               deviceName={deviceName}
               onUpdateDeviceName={handleUpdateDeviceName}
               onConnectDrive={handleConnectDrive}
               onDisconnectDrive={handleDisconnectDrive}
+              onSyncDrive={handleSyncDrive}
+              onDownloadAutoBackup={handleDownloadAutoBackup}
+              onRestoreAutoBackup={handleRestoreAutoBackup}
               onClose={() => setIsSettingsOpen(false)}
               onPinChange={(newPin) => {
                 setActivePin(newPin);
@@ -2471,13 +2991,17 @@
               onTriggerRestore={() => fileInputRef.current?.click()}
               onLoadSamples={() => {
                 const samples = createSampleAppData();
-                saveAppData(samples);
+                persistAppData(samples);
                 setIsSettingsOpen(false);
                 showToast('Örnek veriler yüklendi.', 'success');
               }}
               onDeleteSamples={() => {
+                const now = Date.now();
+                const sampleSakas = appData.sakas.filter(isSampleSaka);
                 const userSakas = appData.sakas.filter(s => !isSampleSaka(s));
-                saveAppData({ ...appData, sakas: userSakas });
+                const nextDeletedAtMap = { ...(appData.deletedAtMap || {}) };
+                sampleSakas.forEach(s => { nextDeletedAtMap['saka:' + s.id] = now; });
+                persistAppData({ ...appData, sakas: userSakas, deletedAtMap: nextDeletedAtMap });
                 setIsSettingsOpen(false);
                 showToast('Örnek veriler silindi.', 'info');
               }}
@@ -2519,8 +3043,8 @@
       isSyncing,
       lastSyncDate,
       lastSyncDevice,
-      onPush,
-      onPull,
+      lastSyncSummary,
+      onSync,
       onOpenSettings,
       onConnect
     }) {
@@ -2546,39 +3070,33 @@
                 }`}>
                   {isConnected ? 'Bağlı' : 'Bağlı Değil'}
                 </span>
+                {lastSyncSummary && !lastSyncSummary.isInitialUpload && (
+                  <span className="text-[10px] font-mono font-bold text-slate-500 dark:text-slate-400">
+                    (+{lastSyncSummary.added} / {lastSyncSummary.updated}g / {lastSyncSummary.deleted}s)
+                  </span>
+                )}
               </div>
               <span className="text-[11px] text-slate-400 dark:text-slate-500 block truncate">
                 {isConnected
                   ? (lastSyncDate
                       ? `Son eşitleme: ${formatDateTimeTr(lastSyncDate)}${lastSyncDevice ? ` (${lastSyncDevice})` : ''}`
                       : 'Henüz eşitleme yapılmadı')
-                  : 'Tablette ve telefonda aynı kayıtları kullanmak için bağlanın'}
+                  : 'Tablette ve telefonda kayıtları birleştirmek için bağlanın'}
               </span>
             </div>
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-auto w-full sm:w-auto">
             {isConnected ? (
-              <>
-                <button
-                  type="button"
-                  onClick={onPush}
-                  disabled={isSyncing}
-                  className="flex-1 sm:flex-initial px-3 py-1.5 rounded-xl bg-sky-50 dark:bg-sky-950/60 hover:bg-sky-100 dark:hover:bg-sky-900/60 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-all shadow-xs"
-                >
-                  <IconCloudUpload className="w-3.5 h-3.5" />
-                  <span>{isSyncing ? 'İşleniyor...' : "Drive'a Gönder"}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={onPull}
-                  disabled={isSyncing}
-                  className="flex-1 sm:flex-initial px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-all shadow-xs"
-                >
-                  <IconCloudDownload className="w-3.5 h-3.5" />
-                  <span>{"Drive'dan Al"}</span>
-                </button>
-              </>
+              <button
+                type="button"
+                onClick={onSync}
+                disabled={isSyncing}
+                className="w-full sm:w-auto px-4 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-all shadow-sm"
+              >
+                <IconRefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                <span>{isSyncing ? 'Eşitleniyor...' : 'Eşitle'}</span>
+              </button>
             ) : (
               <button
                 type="button"
@@ -2595,10 +3113,11 @@
       );
     }
 
-    // --- GOOGLE DRIVE PULL MODAL ---
+    // --- GOOGLE DRIVE PULL / PIN MERGE MODAL ---
     function DrivePullModal({
       payload,
       isAutoPrompt,
+      needsPinInitially = false,
       activePin,
       localSakaCount,
       localNoteCount,
@@ -2610,15 +3129,25 @@
     }) {
       const [customPin, setCustomPin] = useState('');
       const [isSubmitting, setIsSubmitting] = useState(false);
+      const [pinError, setPinError] = useState(needsPinInitially);
 
-      const driveTime = payload?.exportedAt ? new Date(payload.exportedAt).getTime() : 0;
+      useEffect(() => {
+        setPinError(needsPinInitially);
+        setCustomPin('');
+      }, [needsPinInitially, payload]);
+
+      const driveTime = payload?.lastModified || (payload?.exportedAt ? new Date(payload.exportedAt).getTime() : 0);
       const localTime = localLastModified || (lastSyncDate ? new Date(lastSyncDate).getTime() : 0);
       const isLocalNewer = localTime > driveTime + 30000;
 
       const handleProceed = async () => {
         setIsSubmitting(true);
-        await onConfirm(payload, customPin.trim());
+        setPinError(false);
+        const ok = await onConfirm(customPin.trim());
         setIsSubmitting(false);
+        if (ok === false) {
+          setPinError(true);
+        }
       };
 
       return (
@@ -2627,13 +3156,13 @@
             <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 bg-slate-50/50 dark:bg-slate-900/50">
               <div className="flex items-center gap-2.5">
                 <div className="w-9 h-9 rounded-xl bg-sky-50 dark:bg-sky-950 text-sky-600 flex items-center justify-center">
-                  <IconCloudDownload className="w-5 h-5" />
+                  <IconRefreshCw className="w-5 h-5" />
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                    {isAutoPrompt ? "Drive'da Daha Yeni Kayıt Var!" : "Google Drive'dan Kayıtları Al"}
+                    {needsPinInitially ? 'Farklı PIN ile Drive Eşitleme' : 'Drive ile Kayıtları Birleştir'}
                   </h3>
-                  <span className="text-xs text-slate-400">Verileri bu cihaza aktarın</span>
+                  <span className="text-xs text-slate-400">İki taraftaki kayıtlar güvenle birleştirilir</span>
                 </div>
               </div>
               <button onClick={onClose} className="p-2 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer">
@@ -2642,20 +3171,20 @@
             </div>
 
             <div className="p-4 sm:p-6 space-y-4">
-              {isLocalNewer ? (
-                <div className="p-3.5 rounded-2xl bg-rose-50 dark:bg-rose-950/40 border border-rose-300 dark:border-rose-900 text-rose-800 dark:text-rose-200 text-xs font-bold flex items-start gap-2.5">
-                  <IconAlert className="w-5 h-5 text-rose-500 shrink-0 mt-0.5" />
+              {pinError ? (
+                <div className="p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-900 text-amber-800 dark:text-amber-200 text-xs font-bold flex items-start gap-2.5">
+                  <IconKey className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
                   <div>
-                    <span className="block font-black text-sm">Bu cihazdaki kayıtlar daha yeni, yine de üstüne yazılsın mı?</span>
-                    <span className="text-[11px] font-normal text-rose-700 dark:text-rose-300 block mt-1">
-                      Drive'daki yedek bu cihazın kayıtlarından daha eski bir tarihe ait. Devam ederseniz bu cihazdaki yeni değişiklikler kaybolabilir.
+                    <span className="block font-black text-sm">Drive dosyası farklı bir PIN ile şifrelenmiş</span>
+                    <span className="text-[11px] font-normal text-amber-700 dark:text-amber-300 block mt-1">
+                      Birleştirme yapılabilmesi için Drive&apos;daki yedekte kullanılan 6 haneli PIN kodunu girin. Mevcut cihazınızdaki kayıtlar silinmez.
                     </span>
                   </div>
                 </div>
               ) : (
-                <div className="p-3 rounded-2xl bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800 text-sky-800 dark:text-sky-300 text-xs flex items-center gap-2">
-                  <IconCheck className="w-4 h-4 text-sky-600 shrink-0" />
-                  <span>Drive'daki kayıtlar cihazınızdaki yerel verilerle güncellenecektir.</span>
+                <div className="p-3 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300 text-xs flex items-center gap-2">
+                  <IconCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>Her iki taraftaki yeni kayıtlar korunur, çakışanlarda en son değiştirilen geçerli olur.</span>
                 </div>
               )}
 
@@ -2663,7 +3192,7 @@
                 <div className="p-3.5 rounded-2xl bg-sky-50/50 dark:bg-sky-950/20 border border-sky-200 dark:border-sky-900/60 space-y-2">
                   <div className="flex items-center gap-1.5 text-sky-700 dark:text-sky-300">
                     <IconCloud className="w-4 h-4" />
-                    <span className="text-xs font-bold">Drive'daki Kayıt</span>
+                    <span className="text-xs font-bold">Drive&apos;daki Kayıt</span>
                   </div>
                   <div className="space-y-1 text-xs">
                     <div className="flex justify-between text-slate-500 dark:text-slate-400 text-[11px]">
@@ -2705,14 +3234,14 @@
 
               <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 space-y-1.5">
                 <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-300">
-                  Dosya PIN Kodu (Diğer cihazda farklı bir PIN kullandıysanız girin)
+                  Drive Dosyasının 6 Haneli PIN Kodu
                 </label>
                 <input
                   type="password"
                   maxLength={6}
                   value={customPin}
                   onChange={(e) => setCustomPin(e.target.value.replace(/\D/g, ''))}
-                  placeholder={`Mevcut PIN (${activePin}) kullanılacak`}
+                  placeholder={`Mevcut PIN (${activePin}) için boş bırakabilirsiniz`}
                   className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-mono"
                 />
               </div>
@@ -2729,13 +3258,11 @@
               <button
                 type="button"
                 onClick={handleProceed}
-                disabled={isSubmitting}
-                className={`px-4 py-2 rounded-xl text-white font-bold text-xs flex items-center gap-1.5 shadow-md cursor-pointer disabled:opacity-50 ${
-                  isLocalNewer ? 'bg-amber-600 hover:bg-amber-500 shadow-amber-600/20' : 'bg-sky-600 hover:bg-sky-500 shadow-sky-600/20'
-                }`}
+                disabled={isSubmitting || (pinError && customPin.trim().length !== 6)}
+                className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-md shadow-sky-600/20 cursor-pointer disabled:opacity-50"
               >
-                <IconCloudDownload className="w-4 h-4" />
-                <span>{isSubmitting ? 'Açılıyor...' : "Drive'daki Kayıtları Al"}</span>
+                <IconRefreshCw className={`w-4 h-4 ${isSubmitting ? 'animate-spin' : ''}`} />
+                <span>{isSubmitting ? 'Birleştiriliyor...' : 'Birleştir ve Eşitle'}</span>
               </button>
             </div>
           </div>
@@ -3101,10 +3628,12 @@
           return;
         }
         const isSelfNote = targetMode === 'all';
+        const now = Date.now();
         onSaveNote({
-          id: initialNote?.id || 'note-' + Date.now(),
+          id: initialNote?.id || 'note-' + now,
           date: initialNote?.date || toLocalDateString(new Date()),
-          createdAt: initialNote?.createdAt || Date.now(),
+          createdAt: initialNote?.createdAt || now,
+          updatedAt: now,
           targetType: targetMode,
           targetCustomerIds: targetMode === 'all' ? [] : selectedIds,
           targetCustomerNames: targetMode === 'all' ? ['Benim Notum'] : selectedIds.map(cid => {
@@ -3478,7 +4007,8 @@
           },
           employeeName: data.assistants?.[0]?.name || data.employeeName || '',
           employeePhone: data.assistants?.[0]?.phones?.[0]?.number || data.employeePhone || '',
-          vehiclePlate: (data.vehiclePlate || '').trim().toUpperCase()
+          vehiclePlate: (data.vehiclePlate || '').trim().toUpperCase(),
+          updatedAt: Date.now()
         };
         onSave(synced);
       };
@@ -3950,7 +4480,7 @@
                               ...prev,
                               setup: {
                                 ...prev.setup,
-                                customItems: (prev.setup.customItems || []).map(x => x.id === ci.id ? { ...x, done: !x.done } : x)
+                                customItems: (prev.setup.customItems || []).map(x => x.id === ci.id ? { ...x, done: !x.done, updatedAt: Date.now() } : x)
                               }
                             }))}
                             className="w-4 h-4 text-sky-600 rounded"
@@ -3985,11 +4515,12 @@
                         type="button"
                         onClick={() => {
                           if (!newCustomSetup.trim()) return;
+                          const now = Date.now();
                           setData(prev => ({
                             ...prev,
                             setup: {
                               ...prev.setup,
-                              customItems: [...(prev.setup?.customItems || []), { id: 'c-' + Date.now(), text: newCustomSetup.trim(), done: false }]
+                              customItems: [...(prev.setup?.customItems || []), { id: 'c-' + now, text: newCustomSetup.trim(), done: false, updatedAt: now }]
                             }
                           }));
                           setNewCustomSetup('');
@@ -4416,7 +4947,7 @@
                             <input
                               type="checkbox"
                               checked={todo.done}
-                              onChange={(e) => setData(prev => ({ ...prev, todos: prev.todos.map(t => t.id === todo.id ? { ...t, done: e.target.checked } : t) }))}
+                              onChange={(e) => setData(prev => ({ ...prev, todos: prev.todos.map(t => t.id === todo.id ? { ...t, done: e.target.checked, updatedAt: Date.now() } : t) }))}
                               className="w-4 h-4 text-sky-600 rounded"
                             />
                             <span className={`truncate ${todo.done ? 'line-through text-slate-400' : 'text-slate-800 dark:text-slate-200 font-bold'}`}>{todo.text}</span>
@@ -4477,13 +5008,15 @@
         e.preventDefault();
         const amt = parseFloat(amount);
         if (!amt || amt <= 0 || !description.trim()) return;
+        const now = Date.now();
         onAdd({
-          id: 'tx-' + Date.now(),
+          id: 'tx-' + now,
           type,
           amount: amt,
           description: description.trim(),
           date,
-          createdAt: Date.now()
+          createdAt: now,
+          updatedAt: now
         });
         setAmount('');
         setDescription('');
@@ -4560,11 +5093,13 @@
       const handleSubmit = (e) => {
         e.preventDefault();
         if (!text.trim()) return;
+        const now = Date.now();
         onAdd({
-          id: 'todo-' + Date.now(),
+          id: 'todo-' + now,
           text: text.trim(),
           done: false,
-          createdAt: Date.now()
+          createdAt: now,
+          updatedAt: now
         });
         setText('');
       };
@@ -4604,10 +5139,15 @@
       isDriveSyncing,
       lastSyncDate,
       lastSyncDevice,
+      lastSyncSummary,
+      autoLocalBackup,
       deviceName,
       onUpdateDeviceName,
       onConnectDrive,
       onDisconnectDrive,
+      onSyncDrive,
+      onDownloadAutoBackup,
+      onRestoreAutoBackup,
       onClose,
       onPinChange,
       onQuickBackup,
@@ -4810,7 +5350,7 @@
                 </div>
 
                 <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                  Kayıtlarınız Google Drive'ınızda <strong>saka-defteri-sync.json</strong> dosyasında <strong>PIN kodunuzla şifrelenerek</strong> saklanır. Google dâhil hiç kimse PIN olmadan içeriği okuyamaz.
+                  İki yönlü akıllı birleştirme: Tek <strong>Eşitle</strong> butonuyla cihazınızdaki ve Drive&apos;daki kayıtlar kimliğe ve en son değişiklik saatine göre birleştirilir; sadece bir tarafta bulunan yeni kayıtlar asla silinmez.
                 </p>
 
                 {/* Device Name Setting */}
@@ -4834,18 +5374,48 @@
                   </div>
                 </div>
 
+                {lastSyncSummary && (
+                  <div className="p-2.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 flex items-center justify-between text-[11px]">
+                    <span className="text-slate-500">Son Eşitleme Özeti:</span>
+                    {lastSyncSummary.isInitialUpload ? (
+                      <span className="font-bold text-sky-600 dark:text-sky-400">İlk yükleme yapıldı</span>
+                    ) : (
+                      <span className="font-mono font-bold">
+                        <span className="text-emerald-600 dark:text-emerald-400">+{lastSyncSummary.added} eklendi</span>
+                        {' • '}
+                        <span className="text-sky-600 dark:text-sky-400">{lastSyncSummary.updated} güncellendi</span>
+                        {' • '}
+                        <span className="text-rose-600 dark:text-rose-400">{lastSyncSummary.deleted} silindi</span>
+                      </span>
+                    )}
+                  </div>
+                )}
+
                 {isDriveConnected ? (
-                  <div className="pt-1 flex items-center justify-between">
-                    <span className="text-[11px] text-slate-400">
-                      Son Eşitleme: <strong className="text-slate-700 dark:text-slate-300">{formatDateTimeTr(lastSyncDate)}</strong>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={onDisconnectDrive}
-                      className="px-3 py-1.5 rounded-xl bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-300 border border-rose-200 dark:border-rose-900 text-xs font-bold cursor-pointer"
-                    >
-                      Bağlantıyı Kes
-                    </button>
+                  <div className="pt-1 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] text-slate-400">
+                        Son Eşitleme: <strong className="text-slate-700 dark:text-slate-300">{formatDateTimeTr(lastSyncDate)}</strong>
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={onSyncDrive}
+                        disabled={isDriveSyncing}
+                        className="px-3 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      >
+                        <IconRefreshCw className={`w-3.5 h-3.5 ${isDriveSyncing ? 'animate-spin' : ''}`} />
+                        <span>{isDriveSyncing ? 'Eşitleniyor...' : 'Şimdi Eşitle'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={onDisconnectDrive}
+                        className="px-3 py-2 rounded-xl bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-300 border border-rose-200 dark:border-rose-900 text-xs font-bold cursor-pointer"
+                      >
+                        Bağlantıyı Kes
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <button
@@ -4923,6 +5493,40 @@
                     </div>
                   </button>
                 </div>
+
+                {autoLocalBackup && (
+                  <div className="p-3 rounded-xl bg-amber-50/70 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/60 space-y-2">
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <span className="font-bold text-amber-800 dark:text-amber-300">Eşitleme Öncesi Otomatik Yedek</span>
+                      <span className="font-mono text-[10px] text-amber-700 dark:text-amber-400">{formatDateTimeTr(autoLocalBackup.exportedAt)}</span>
+                    </div>
+                    <p className="text-[10px] text-amber-700/90 dark:text-amber-300/80">
+                      Son Drive eşitlemesinden hemen önce cihazınızdan alındı ({autoLocalBackup.sakaCount} saka, {autoLocalBackup.noteCount} not).
+                    </p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={onDownloadAutoBackup}
+                        className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200 text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                      >
+                        <IconDownload className="w-3.5 h-3.5" />
+                        <span>İndir (.saka)</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (confirm('Eşitleme öncesi otomatik alınan yerel yedeğe geri dönmek istediğinize emin misiniz?')) {
+                            onRestoreAutoBackup();
+                          }
+                        }}
+                        className="px-2.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-bold flex items-center justify-center gap-1 cursor-pointer"
+                      >
+                        <IconRotateCcw className="w-3.5 h-3.5" />
+                        <span>Bu Yedeğe Dön</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Sample Data Management */}
