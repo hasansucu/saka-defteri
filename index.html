@@ -6,11 +6,15 @@
   <title>Saka Defteri - Damacana Takip & Şifre Defteri</title>
   <meta name="description" content="Damacana su sakaları için araç takip, şifre, abonelik ve muhasebe defteri." />
   <meta name="theme-color" content="#0284c7" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="manifest" href="./manifest.json" />
-  <link rel="icon" type="image/svg+xml" href="./icon.svg" />
-  <link rel="apple-touch-icon" href="./icon.svg" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Saka Defteri" />
+  <link rel="manifest" href="/saka-defteri/manifest.json" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/saka-defteri/pwa-192x192.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/saka-defteri/pwa-512x512.png" />
+  <link rel="icon" type="image/svg+xml" href="/saka-defteri/icon.svg" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/saka-defteri/apple-touch-icon.png" />
 
   <!-- Global Error Handler: Displays errors in a clear red box instead of a blank white page -->
   <script>
@@ -117,11 +121,14 @@
 <body class="bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 min-h-screen antialiased transition-colors duration-200">
   <div id="root"></div>
 
-  <!-- Service Worker Registration for 100% Offline PWA -->
+  <!-- Service Worker Registration for 100% Offline PWA (/saka-defteri/) -->
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js')
+        var isSubpath = window.location.pathname.indexOf('/saka-defteri') === 0;
+        var swUrl = isSubpath ? '/saka-defteri/sw.js' : './sw.js';
+        var swScope = isSubpath ? '/saka-defteri/' : './';
+        navigator.serviceWorker.register(swUrl, { scope: swScope })
           .then(reg => console.log('Saka Defteri SW kayıtlı:', reg.scope))
           .catch(err => console.warn('SW kayıt hatası:', err));
       });
@@ -1131,6 +1138,58 @@
       const [isDriveMenuOpen, setIsDriveMenuOpen] = useState(false);
       const [autoLockSetting, setAutoLockSetting] = useState(() => localStorage.getItem('saka_defteri_autolock_setting') || '5m');
 
+      // Offline & PWA Install states
+      const [isOnline, setIsOnline] = useState(() => (typeof navigator !== 'undefined' ? navigator.onLine : true));
+      const [deferredInstallPrompt, setDeferredInstallPrompt] = useState(null);
+      const [isPwaInstalled, setIsPwaInstalled] = useState(() => {
+        if (typeof window === 'undefined') return false;
+        return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+      });
+      const [isIOSDevice, setIsIOSDevice] = useState(false);
+      const [showIOSInstallModal, setShowIOSInstallModal] = useState(false);
+      const [installBannerDismissed, setInstallBannerDismissed] = useState(false);
+
+      useEffect(() => {
+        const ua = (window.navigator.userAgent || '').toLowerCase();
+        setIsIOSDevice(/iphone|ipad|ipod/.test(ua));
+
+        const onOnline = () => setIsOnline(true);
+        const onOffline = () => setIsOnline(false);
+        const onBeforeInstall = (e) => {
+          e.preventDefault();
+          setDeferredInstallPrompt(e);
+        };
+        const onAppInstalled = () => {
+          setIsPwaInstalled(true);
+          setDeferredInstallPrompt(null);
+        };
+
+        window.addEventListener('online', onOnline);
+        window.addEventListener('offline', onOffline);
+        window.addEventListener('beforeinstallprompt', onBeforeInstall);
+        window.addEventListener('appinstalled', onAppInstalled);
+        return () => {
+          window.removeEventListener('online', onOnline);
+          window.removeEventListener('offline', onOffline);
+          window.removeEventListener('beforeinstallprompt', onBeforeInstall);
+          window.removeEventListener('appinstalled', onAppInstalled);
+        };
+      }, []);
+
+      const handlePwaInstall = async () => {
+        if (deferredInstallPrompt) {
+          await deferredInstallPrompt.prompt();
+          const choice = await deferredInstallPrompt.userChoice;
+          if (choice && choice.outcome === 'accepted') {
+            setIsPwaInstalled(true);
+            setDeferredInstallPrompt(null);
+            showToast('Saka Defteri ana ekrana eklendi!', 'success');
+          }
+        } else if (isIOSDevice) {
+          setShowIOSInstallModal(true);
+        }
+      };
+
       const getAutoLockDurationMs = (setting) => {
         switch (setting) {
           case 'immediate': return 0;
@@ -1778,6 +1837,14 @@
       // --- RENDER MAIN APPLICATION ---
       return (
         <div className="min-h-screen flex flex-col pb-16">
+          {/* Offline Reassurance Banner */}
+          {!isOnline && (
+            <div className="bg-emerald-600 dark:bg-emerald-700 text-white text-[11px] px-3 py-1 text-center font-bold flex items-center justify-center gap-1.5 shadow-xs">
+              <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+              <span>Çevrimdışı Mod: İnternet gerekmez, tüm verileriniz cihazınızda güvende çalışır.</span>
+            </div>
+          )}
+
           {/* Header */}
           <header className="sticky top-0 z-40 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-4 py-3">
             <div className="max-w-4xl mx-auto flex items-center justify-between gap-3">
@@ -1935,6 +2002,70 @@
               </div>
             </div>
           </header>
+
+          {/* Dismissible In-App PWA Install Banner */}
+          {!isPwaInstalled && (deferredInstallPrompt || isIOSDevice) && !installBannerDismissed && (
+            <div className="bg-sky-50 dark:bg-sky-950/60 border-b border-sky-200/80 dark:border-sky-900 px-3 py-2">
+              <div className="max-w-4xl mx-auto flex items-center justify-between gap-2">
+                <p className="text-[11px] font-semibold text-sky-900 dark:text-sky-100 leading-snug">
+                  Saka Defteri&apos;ni ana ekrana yükleyerek internetsiz tam ekran kullanabilirsiniz.
+                </p>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={handlePwaInstall}
+                    className="px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] flex items-center gap-1 shadow-xs cursor-pointer"
+                  >
+                    <IconSmartphone className="w-3.5 h-3.5" />
+                    <span>Uygulamayı Yükle</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setInstallBannerDismissed(true)}
+                    aria-label="Kapat"
+                    className="p-1.5 rounded-lg text-sky-700 dark:text-sky-300 hover:bg-sky-100 dark:hover:bg-sky-900/60 cursor-pointer"
+                  >
+                    <IconX className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* iOS Safari Add to Home Screen Modal */}
+          {showIOSInstallModal && (
+            <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
+              <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center">
+                <div className="w-12 h-12 rounded-2xl bg-sky-100 dark:bg-sky-950 text-sky-600 dark:text-sky-400 flex items-center justify-center mx-auto mb-3">
+                  <IconSmartphone className="w-6 h-6" />
+                </div>
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  iPhone / iPad&apos;e Ekle
+                </h3>
+                <div className="mt-2 text-xs text-slate-600 dark:text-slate-300 leading-relaxed text-left bg-slate-50 dark:bg-slate-800/60 p-3.5 rounded-2xl border border-slate-200 dark:border-slate-700/60 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-sky-600 text-white flex items-center justify-center text-[10px] font-bold shrink-0">1</span>
+                    <span>Safari&apos;nin altındaki <strong>Paylaş</strong> simgesine dokunun.</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-sky-600 text-white flex items-center justify-center text-[10px] font-bold shrink-0">2</span>
+                    <span>Aşağı kaydırıp <strong>&quot;Ana Ekrana Ekle&quot;</strong> seçeneğini seçin.</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-sky-600 text-white flex items-center justify-center text-[10px] font-bold shrink-0">3</span>
+                    <span>Artık internetiniz olmasa bile doğrudan ana ekrandan açabilirsiniz!</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowIOSInstallModal(false)}
+                  className="mt-4 w-full rounded-2xl bg-slate-100 dark:bg-slate-800 py-2.5 text-xs font-bold text-slate-800 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700 cursor-pointer"
+                >
+                  Anladım
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Main Dashboard */}
           <main className="flex-1 max-w-4xl w-full mx-auto p-3.5 sm:p-5 space-y-4 pb-32 sm:pb-24">
@@ -2319,6 +2450,9 @@
               onToggleTheme={() => setIsDark(!isDark)}
               autoLockSetting={autoLockSetting}
               onAutoLockSettingChange={handleAutoLockSettingChange}
+              isPwaInstalled={isPwaInstalled}
+              canInstallPwa={!!deferredInstallPrompt || isIOSDevice}
+              onInstallPwa={handlePwaInstall}
               isDriveConnected={isDriveConnected}
               isDriveSyncing={isDriveSyncing}
               lastSyncDate={lastSyncDate}
@@ -4463,6 +4597,9 @@
       onToggleTheme,
       autoLockSetting = '5m',
       onAutoLockSettingChange,
+      isPwaInstalled,
+      canInstallPwa,
+      onInstallPwa,
       isDriveConnected,
       isDriveSyncing,
       lastSyncDate,
@@ -4554,6 +4691,29 @@
                   <span>{isDark ? 'Açık Tema' : 'Koyu Tema'}</span>
                 </button>
               </div>
+
+              {/* PWA Install Section */}
+              {!isPwaInstalled && canInstallPwa && (
+                <div className="p-4 rounded-2xl bg-emerald-50/70 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/50 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <IconSmartphone className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                      <span className="text-xs font-bold text-slate-800 dark:text-slate-200">Uygulama Olarak Yükle (PWA)</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={onInstallPwa}
+                      className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs cursor-pointer"
+                    >
+                      <IconSmartphone className="w-3.5 h-3.5" />
+                      <span>Ana Ekrana Ekle</span>
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                    Telefon veya tabletinizin ana ekranına yükleyin; tarayıcı çubuğu olmadan açılır ve internet yokken de çalışır.
+                  </p>
+                </div>
+              )}
 
               {/* Auto-Lock Duration */}
               <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 space-y-2">

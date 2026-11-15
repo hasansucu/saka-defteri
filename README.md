@@ -1,15 +1,11 @@
-# Saka Defteri - GitHub Pages Dosyaları
+# Saka Defteri - GitHub Pages PWA Kurulumu
 
-Bu klasördeki dosyalar hiçbir derleme (npm build, vite, node) gerektirmeden doğrudan GitHub Pages üzerinde çalışır:
+Bu klasördeki dosyaları doğrudan GitHub (`saka-defteri`) reponuza yükleyin:
+1. index.html
+2. manifest.json
+3. sw.js
+4. pwa-192x192.png, pwa-512x512.png, pwa-maskable-512x512.png, apple-touch-icon.png
+5. icon.svg
 
-1. `index.html` -> Tüm uygulama arayüzü, şifreleme, PIN ve kayıt mantığı
-2. `manifest.json` -> Chrome / Android "Ana Ekrana Ekle" PWA bildirimi
-3. `sw.js` -> Çevrimdışı (offline) çalışma Service Worker'ı
-4. `icon.svg` -> Damacana su ikonu
-
-## Tabletten GitHub Pages'e Yükleme Adımları:
-1. GitHub.com'a girip ücretsiz hesabınızla yeni bir repo (depo) açın: `saka-defteri`
-2. "Add file" > "Upload files" seçeneğiyle bu 4 dosyayı yükleyin.
-3. Reponun **Settings > Pages** sekmesine gidin.
-4. "Branch: main", "/ (root)" seçip **Save** butonuna basın.
-5. 1-2 dakika içinde `https://<kullanici-adiniz>.github.io/saka-defteri/` adresiniz hazır olur!
+GitHub Settings > Pages bölümünden Branch: main, Folder: / (root) seçip Save'e basın.
+`https://<kullanici-adiniz>.github.io/saka-defteri/` adresinden telefona ve tablete uygulama olarak yüklenebilir ve internetsiz çalışır!

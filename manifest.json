@@ -1,24 +1,37 @@
 {
-  "id": "./",
+  "id": "/saka-defteri/",
   "name": "Saka Defteri",
-  "short_name": "SakaDefteri",
+  "short_name": "Saka Defteri",
   "description": "Damacana su sakaları için araç takip, şifre, abonelik ve muhasebe defteri.",
-  "start_url": "./",
-  "scope": "./",
+  "start_url": "/saka-defteri/",
+  "scope": "/saka-defteri/",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#0f172a",
   "theme_color": "#0284c7",
+  "lang": "tr",
   "icons": [
     {
-      "src": "./ikon.svg",
-      "sizes": "192x192 512x512",
-      "type": "image/svg+xml",
+      "src": "/saka-defteri/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "./icon.svg",
-      "sizes": "192x192 512x512",
+      "src": "/saka-defteri/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/saka-defteri/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/saka-defteri/icon.svg",
+      "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any"
     }
